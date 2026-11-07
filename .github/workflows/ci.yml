@@ -1,0 +1,121 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# A newer push to the same PR cancels the older run; runs on main always finish.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+env:
+  IMAGE_NAME: placement-optimiser
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - run: python tests/test_model.py
+      - run: python tests/test_exporter.py
+
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write            # push to ghcr.io with the built-in GITHUB_TOKEN
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compute image name and tag
+        id: meta
+        run: |
+          OWNER=$(echo "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')
+          TAG="${GITHUB_SHA::7}"
+          echo "IMAGE=ghcr.io/$OWNER/$IMAGE_NAME" >> "$GITHUB_ENV"
+          echo "TAG=$TAG" >> "$GITHUB_ENV"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Build image
+        run: docker build -t "$IMAGE:$TAG" .
+
+      - name: Guardrail - image must not run as root
+        run: |
+          UID_IN_IMAGE=$(docker run --rm --entrypoint id "$IMAGE:$TAG" -u)
+          echo "container user id: $UID_IN_IMAGE"
+          test "$UID_IN_IMAGE" != "0"
+
+      - name: Smoke test - container starts and answers
+        run: |
+          docker run -d --name smoke -p 8000:8000 "$IMAGE:$TAG"
+          trap 'docker logs smoke; docker rm -f smoke' EXIT
+          for i in $(seq 1 30); do curl -fs http://localhost:8000/healthz && break; sleep 1; done
+          curl -fs http://localhost:8000/healthz
+          curl -fs http://localhost:8000/metrics | grep -q placement_has_plan
+
+      - name: Trivy scan (fails on fixable HIGH/CRITICAL)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ${{ env.IMAGE }}:${{ env.TAG }}
+          format: table
+          exit-code: "1"
+          ignore-unfixed: true
+          vuln-type: os,library
+          severity: HIGH,CRITICAL
+
+      - name: Log in to GHCR
+        if: github.event_name == 'push'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push image
+        if: github.event_name == 'push'
+        run: docker push "$IMAGE:$TAG"
+
+  deploy:
+    # Only on main. Does not touch the cluster: it edits config-repo, ArgoCD does the rest.
+    if: github.event_name == 'push'
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out config-repo
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/NT548-config-repo
+          token: ${{ secrets.CONFIG_REPO_TOKEN }}
+          path: config-repo
+
+      - name: Update image tag in config-repo
+        env:
+          TAG: ${{ needs.build.outputs.tag }}
+        run: |
+          OWNER=$(echo "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')
+          cd config-repo
+          f=apps/placement-optimiser/values.yaml
+          test -f "$f" || { echo "missing $f in config-repo"; exit 1; }
+          sed -i -E "s|^(  repository: ).*|\1ghcr.io/$OWNER/$IMAGE_NAME|; s|^(  tag: ).*|\1\"$TAG\"|" "$f"
+          git diff --quiet && { echo "tag already $TAG, nothing to do"; exit 0; }
+          git config user.name "ci-bot"
+          git config user.email "ci-bot@users.noreply.github.com"
+          git commit -am "ci: placement-optimiser -> $TAG ($GITHUB_SHA)"
+          for i in 1 2 3; do
+            git pull --rebase origin main && git push origin HEAD:main && exit 0
+            sleep 3
+          done
+          exit 1

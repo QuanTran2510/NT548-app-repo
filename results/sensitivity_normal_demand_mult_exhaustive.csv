@@ -1,0 +1,7 @@
+value,status,cost,latency,nodes,pods,nodes_us-east,nodes_eu-west,nodes_ap-southeast,reason
+0.5,ok,0.07,20.0,3,9,1,1,1,
+1.0,ok,0.07,28.12,3,10,1,1,1,
+1.5,ok,0.07,28.12,3,12,1,1,1,
+2.0,ok,0.0908,20.0,4,15,2,1,1,
+3.0,ok,0.1136,20.0,5,22,2,2,1,
+4.0,ok,0.1116,22.71,5,24,3,1,1,

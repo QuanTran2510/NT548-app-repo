@@ -1,0 +1,2 @@
+# One CVE id per line, each with a comment saying WHY it is accepted and until when.
+# Empty on purpose: nothing is ignored by default.

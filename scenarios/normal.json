@@ -1,0 +1,2 @@
+{"name": "normal", "description": "Ordinary day: fits the 3 nodes the lab already has",
+ "users": {"us-east": 3000, "eu-west": 2000, "ap-southeast": 1000}, "active_ratio": 0.10}

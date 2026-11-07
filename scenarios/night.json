@@ -1,0 +1,2 @@
+{"name": "night", "description": "Quiet hours: few active users everywhere",
+ "users": {"us-east": 750, "eu-west": 500, "ap-southeast": 250}, "active_ratio": 0.03}

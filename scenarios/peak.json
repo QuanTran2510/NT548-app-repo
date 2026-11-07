@@ -1,0 +1,3 @@
+{"name": "peak", "description": "Flash sale: double the users, a quarter of them active, chat and API hit hardest",
+ "users": {"us-east": 6000, "eu-west": 4000, "ap-southeast": 2000}, "active_ratio": 0.25,
+ "service_mix": {"realtime-chat": 1.2, "web-api": 1.5, "analytics": 0.5}}

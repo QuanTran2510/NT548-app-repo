@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Service placement &amp; cost optimiser</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<style>
+ body{font-family:system-ui,sans-serif;max-width:960px;margin:2rem auto;padding:0 1rem;color:#222}
+ fieldset{display:flex;flex-wrap:wrap;gap:1rem;border:1px solid #ccc;border-radius:8px}
+ label{display:flex;flex-direction:column;font-size:.85rem;gap:.2rem}
+ table{border-collapse:collapse;width:100%;margin:.5rem 0}
+ th,td{border:1px solid #ddd;padding:.4rem .6rem;text-align:left}
+ th{background:#f4f4f4}.num{font-variant-numeric:tabular-nums}
+ .bad{color:#b00020;font-weight:600} button{padding:.5rem 1rem}
+</style></head><body>
+<h1>Service placement &amp; cost optimiser</h1>
+<p>Sites: {{ regions|join(", ") }}. Services: {{ services.keys()|join(", ") }}. Cost = t3.small nodes only; latency and demand are model parameters.</p>
+
+<fieldset><legend>Scenario</legend>
+ <label>Traffic scenario<select id="scenario">{% for name, sc in scenarios.items() %}<option value="{{ name }}" title="{{ sc.description }}">{{ name }}</option>{% endfor %}</select></label>
+ <label>Active users (blank = scenario)<input id="active_ratio" type="number" step="0.01" placeholder="e.g. 0.10"></label>
+ <label>Demand ×<input id="demand_mult" type="number" step="0.1" value="1"></label>
+ <label>ap-southeast demand ×<input id="ap_demand" type="number" step="0.5" value="1"></label>
+ <label>Node price ×<input id="cost_mult" type="number" step="0.1" value="1"></label>
+ <label>SLO ×<input id="slo_mult" type="number" step="0.1" value="1"></label>
+ <label>Node budget ($/h)<input id="budget" type="number" step="0.01" value="{{ budget }}"></label>
+ <label>Solver<select id="solver"><option value="auto">auto</option><option>ilp</option>
+  <option>greedy</option><option>exhaustive</option></select></label>
+ <button id="run">Solve</button>
+</fieldset>
+
+<h2>Placement</h2><div id="summary"></div><div id="nodes"></div><div id="table"></div>
+
+<h2>Sensitivity</h2>
+<label>Vary <select id="param">{% for s in sweeps %}<option>{{ s }}</option>{% endfor %}</select></label>
+<canvas id="chart" height="110"></canvas>
+
+<script>
+const $ = id => document.getElementById(id);
+const qs = () => new URLSearchParams(["scenario","active_ratio","demand_mult","ap_demand","cost_mult","slo_mult","budget","solver"]
+  .map(k => [k, $(k).value]));
+let chart;
+
+async function solve() {
+  const r = await (await fetch("/api/solve?" + qs())).json();
+  if (r.status !== "ok") {
+    $("summary").innerHTML = `<p class="bad">${r.status}: ${r.reason || ""}</p>`; $("table").innerHTML = ""; return;
+  }
+  $("summary").innerHTML = `<p>Scenario <b>${r.scenario}</b>, solver <b>${r.solver}</b> — node cost <b>$${r.cost}/h</b>,
+    mean latency <b>${r.mean_latency_ms} ms</b> (model), ${r.pods_total} pods, objective ${r.objective}</p>`;
+  let nrows = "";
+  for (const [j, n] of Object.entries(r.nodes)) {
+    const m = r.memory[j];
+    nrows += `<tr><td>${j}</td><td class="num">${n}</td><td class="num">${m.used_mi} / ${m.capacity_mi} Mi</td></tr>`;
+  }
+  $("nodes").innerHTML = `<table><tr><th>Site</th><th>t3.small nodes</th><th>RAM requested / available</th></tr>${nrows}</table>`;
+  let rows = "";
+  for (const [s, p] of Object.entries(r.placement)) {
+    const pods = Object.entries(p.pods).map(([j, n]) => `${j} ×${n}`).join(", ");
+    const route = Object.entries(p.routing).map(([c, m]) => `${c} → ${Object.entries(m).map(([j, sh]) => sh < 1 ? `${j} ${Math.round(sh*100)}%` : j).join(" + ")}`).join("<br>");
+    rows += `<tr><td>${s}</td><td>${pods}</td><td class="num">${p.mem_mi} Mi</td><td>${route}</td></tr>`;
+  }
+  $("table").innerHTML = `<table><tr><th>Service</th><th>Pods</th><th>RAM/pod</th><th>Routing (model only)</th></tr>${rows}</table>`;
+}
+
+async function sens() {
+  const q = qs(); q.set("param", $("param").value);
+  const rows = (await (await fetch("/api/sensitivity?" + q)).json()).filter(x => x.status === "ok");
+  const data = {labels: rows.map(x => x.value), datasets: [
+    {label: "cost ($/h)", data: rows.map(x => x.cost), yAxisID: "y"},
+    {label: "mean latency (ms)", data: rows.map(x => x.latency), yAxisID: "y1"},
+    {label: "nodes", data: rows.map(x => x.nodes), yAxisID: "y2", stepped: true}]};
+  if (chart) chart.destroy();
+  chart = new Chart($("chart"), {type: "line", data, options: {scales: {
+    y: {position: "left", title: {display: true, text: "$/h"}},
+    y1: {position: "right", title: {display: true, text: "ms"}, grid: {drawOnChartArea: false}},
+    y2: {position: "right", title: {display: true, text: "nodes"}, grid: {drawOnChartArea: false}, ticks: {stepSize: 1}}}}});
+}
+
+const go = () => { solve(); sens(); };
+$("run").onclick = go; $("param").onchange = sens; go();
+</script></body></html>
