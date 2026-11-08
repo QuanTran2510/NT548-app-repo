@@ -23,14 +23,15 @@ LATENCY = {
 #   node_price   $/hour of ONE node (Linux on-demand; check AWS Pricing Calculator before quoting)
 #   node_mem_mi  RAM per node that pods may request (2 GiB minus OS, k3s, kube-proxy, flannel)
 #   reserved_mi  RAM already requested by non-optimiser workloads on the site's FIRST node
-#                (us-east: control plane + ArgoCD; eu-west: the optimiser pod). Measure with
+#                (us-east: control plane + ArgoCD; eu-west: the optimiser pod; ap-southeast: ArgoCD parts
+#                + the monitoring stack Prometheus/Grafana/kube-state-metrics, pinned there). Measure with
 #                `kubectl describe node <node> | grep -A8 "Allocated resources"`.
 #   min_nodes    the lab always has one node per site (Terraform validation requires >= 1)
 #   max_nodes    per-site cap (also enforced by terraform/variables.tf)
 SITES = {
     "us-east":      {"node_price": 0.0208, "node_mem_mi": 1300, "reserved_mi": 850, "min_nodes": 1, "max_nodes": 4},
     "eu-west":      {"node_price": 0.0228, "node_mem_mi": 1300, "reserved_mi": 150, "min_nodes": 1, "max_nodes": 4},
-    "ap-southeast": {"node_price": 0.0264, "node_mem_mi": 1300, "reserved_mi": 300,   "min_nodes": 1, "max_nodes": 4},
+    "ap-southeast": {"node_price": 0.0264, "node_mem_mi": 1300, "reserved_mi": 700, "min_nodes": 1, "max_nodes": 4},
 }
 MAX_TOTAL_NODES = 9          # AWS Academy Learner Lab: at most 9 running instances
 
@@ -46,7 +47,7 @@ SERVICES = {
 }
 
 UTILIZATION = 0.7        # plan pods to run at <= 70 % of capacity (headroom for bursts)
-DEFAULT_BUDGET = 0.15    # $/hour for ALL nodes (about 6 t3.small)
+DEFAULT_BUDGET = 0.18    # $/hour for ALL nodes (about 8 t3.small; the lab allows 9 machines)
 LAMBDA = 0.002           # $/hour charged per ms of demand-weighted mean latency (10 ms ~ 1 node)
 POD_OVERHEAD = 0.0005    # $/hour per pod (monitoring, scheduling): breaks ties, avoids useless pods
 

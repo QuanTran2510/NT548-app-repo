@@ -25,15 +25,15 @@ t3.small prices per region (verify on the AWS Pricing Calculator).
 |---|---|---|---|
 | normal | 3000 / 2000 / 1000 | 10 % | 1 / 1 / 1 (the 3 nodes the lab has) |
 | asia-launch | 3000 / 2000 / 6000 | 15 % | 1 / 1 / 2 |
-| peak | 6000 / 4000 / 2000 | 25 % | 3 / 2 / 1 |
+| peak | 6000 / 4000 / 2000 | 25 % | 3 / 2 / 2 |
 | night | 750 / 500 / 250 | 3 % | 1 / 1 / 1 |
 
-## Results (objective = cost + pod overhead + 0.002 x latency; lower is better)
+## Results (objective = cost + pod overhead + 0.002 x latency; lower is better; budget $0.18/h)
 | Scenario | greedy | exhaustive | ilp |
 |---|---|---|---|
 | normal | 0.1599 (4 nodes) | 0.1363 (4 nodes) | 0.1237 (3 nodes) |
 | asia-launch | 0.2023 (5 nodes) | 0.1672 (5 nodes) | 0.1542 (4 nodes) |
-| peak | over_capacity | 0.2202 (6 nodes) | 0.1947 (6 nodes) |
+| peak | over_capacity | 0.2222 (7 nodes) | 0.2186 (7 nodes) |
 | night | 0.1589 (4 nodes) | 0.1221 (3 nodes) | 0.1221 (3 nodes) |
 
 ILP needs fewer nodes because it may split a region's traffic between sites and so packs pods tighter.
@@ -44,7 +44,9 @@ The ILP column was computed with an independent HiGHS solver while developing; r
 `reserved_mi` is the RAM of a site's first node that pods must not use. It was calibrated on the live cluster:
 `kubectl describe node` showed requests of 588 Mi (us-east) and 1024 Mi (eu-west), matching the model's own
 accounting (pods + system / optimiser pod); `kubectl top nodes` showed 1259 Mi really used on the control-plane node
-and about 330 Mi of ArgoCD on the ap-southeast node. Values: us-east 850, eu-west 150, ap-southeast 300.
+and about 330 Mi of ArgoCD on the ap-southeast node. Values: us-east 850, eu-west 150, ap-southeast 700.
+ap-southeast also hosts the monitoring stack (Prometheus 200 Mi, Grafana 128 Mi, kube-state-metrics 48 Mi, ...),
+which is why its reserve is 700 and the default budget went from $0.15 to $0.18/h (peak needs 7 nodes).
 
 ## Run
     python -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt
