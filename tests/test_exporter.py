@@ -32,8 +32,9 @@ def test_env_files_carry_replicas_node_selector_and_memory():
 
 
 def test_node_file_is_what_terraform_reads():
-    counts, text = plan_nodes(result("asia-launch"))
-    assert counts == {"us-east": 1, "eu-west": 1, "ap-southeast": 2}
+    r = result("asia-launch")
+    counts, text = plan_nodes(r)
+    assert counts == r["nodes"] and counts["ap-southeast"] == 2
     assert json.loads(text) == {"node_counts": counts}
     assert str(NODES_FILE) in plan(result("asia-launch"))
 
@@ -92,7 +93,7 @@ def test_summary_mentions_new_nodes_and_ansible_step():
     before_pods, before_nodes = {}, {"us-east": 1, "eu-west": 1, "ap-southeast": 1}
     md = summary_markdown(result("asia-launch"), before_pods, before_nodes)
     assert "join-new-nodes.sh" in md and "| ap-southeast | 1 | 2 |" in md
-    md2 = summary_markdown(result("normal"), before_pods, {"us-east": 2, "eu-west": 1, "ap-southeast": 1})
+    md2 = summary_markdown(result("normal"), before_pods, {"us-east": 4, "eu-west": 4, "ap-southeast": 4})   # any plan has fewer
     assert "REMOVED" in md2 and "drain" in md2
 
 

@@ -28,9 +28,9 @@ LATENCY = {
 #   min_nodes    the lab always has one node per site (Terraform validation requires >= 1)
 #   max_nodes    per-site cap (also enforced by terraform/variables.tf)
 SITES = {
-    "us-east":      {"node_price": 0.0208, "node_mem_mi": 1300, "reserved_mi": 700, "min_nodes": 1, "max_nodes": 4},
+    "us-east":      {"node_price": 0.0208, "node_mem_mi": 1300, "reserved_mi": 850, "min_nodes": 1, "max_nodes": 4},
     "eu-west":      {"node_price": 0.0228, "node_mem_mi": 1300, "reserved_mi": 150, "min_nodes": 1, "max_nodes": 4},
-    "ap-southeast": {"node_price": 0.0264, "node_mem_mi": 1300, "reserved_mi": 0,   "min_nodes": 1, "max_nodes": 4},
+    "ap-southeast": {"node_price": 0.0264, "node_mem_mi": 1300, "reserved_mi": 300,   "min_nodes": 1, "max_nodes": 4},
 }
 MAX_TOTAL_NODES = 9          # AWS Academy Learner Lab: at most 9 running instances
 

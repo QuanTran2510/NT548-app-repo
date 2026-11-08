@@ -21,7 +21,7 @@ user, node RAM and `reserved_mi` (measure with `kubectl describe node <n> | grep
 t3.small prices per region (verify on the AWS Pricing Calculator).
 
 ## Scenarios (`scenarios/*.json`)
-| Scenario | Users (us / eu / ap) | Active | Optimal nodes (us/eu/ap) |
+| Scenario | Users (us / eu / ap) | Active | ILP nodes (us/eu/ap) |
 |---|---|---|---|
 | normal | 3000 / 2000 / 1000 | 10 % | 1 / 1 / 1 (the 3 nodes the lab has) |
 | asia-launch | 3000 / 2000 / 6000 | 15 % | 1 / 1 / 2 |
@@ -31,13 +31,20 @@ t3.small prices per region (verify on the AWS Pricing Calculator).
 ## Results (objective = cost + pod overhead + 0.002 x latency; lower is better)
 | Scenario | greedy | exhaustive | ilp |
 |---|---|---|---|
-| normal | 0.1599 (4 nodes) | 0.1313 (3) | 0.1237 (3) |
-| asia-launch | 0.1759 (4) | 0.1548 (4) | 0.1542 (4) |
-| peak | 0.2094 (6) | 0.1929 (6) | 0.1922 (6) |
-| night | 0.1589 (4) | 0.1145 (3) | 0.1145 (3) |
+| normal | 0.1599 (4 nodes) | 0.1363 (4 nodes) | 0.1237 (3 nodes) |
+| asia-launch | 0.2023 (5 nodes) | 0.1672 (5 nodes) | 0.1542 (4 nodes) |
+| peak | over_capacity | 0.2202 (6 nodes) | 0.1947 (6 nodes) |
+| night | 0.1589 (4 nodes) | 0.1221 (3 nodes) | 0.1221 (3 nodes) |
 
+ILP needs fewer nodes because it may split a region's traffic between sites and so packs pods tighter.
 The ILP column was computed with an independent HiGHS solver while developing; regenerate it with CBC:
 `python run_sensitivity.py --scenario normal ilp exhaustive greedy`.
+
+## Memory calibration (`reserved_mi` in `data.py`)
+`reserved_mi` is the RAM of a site's first node that pods must not use. It was calibrated on the live cluster:
+`kubectl describe node` showed requests of 588 Mi (us-east) and 1024 Mi (eu-west), matching the model's own
+accounting (pods + system / optimiser pod); `kubectl top nodes` showed 1259 Mi really used on the control-plane node
+and about 330 Mi of ArgoCD on the ap-southeast node. Values: us-east 850, eu-west 150, ap-southeast 300.
 
 ## Run
     python -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt
