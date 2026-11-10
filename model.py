@@ -23,14 +23,16 @@ from data import (DEFAULT_BUDGET, LAMBDA, LATENCY, MAX_TOTAL_NODES, POD_OVERHEAD
 
 
 def build_instance(scenario="normal", demand_mult=1.0, cost_mult=1.0, region_mult=None,
-                   slo_mult=1.0, budget=DEFAULT_BUDGET, active_ratio=None):
+                   slo_mult=1.0, budget=DEFAULT_BUDGET, active_ratio=None, services=None):
+    """services: {name: {slo_ms, capacity, mem_mi, rps_per_active_user, min_replicas}}; default = data.SERVICES.
+    Services onboarded through the portal come from the config-repo catalog (see catalog.py)."""
     sc = scenario if isinstance(scenario, dict) else load_scenario(scenario)
     region_mult = region_mult or {}
     ratio = sc["active_ratio"] if active_ratio is None else active_ratio
-    services = {}
-    for s, spec in SERVICES.items():
+    out = {}
+    for s, spec in (services or SERVICES).items():
         mix = sc.get("service_mix", {}).get(s, 1.0)
-        services[s] = {
+        out[s] = {
             "slo": spec["slo_ms"] * slo_mult,
             "raw_cap": spec["capacity"],
             "cap": spec["capacity"] * UTILIZATION,          # effective req/s per pod
@@ -40,7 +42,7 @@ def build_instance(scenario="normal", demand_mult=1.0, cost_mult=1.0, region_mul
                           * demand_mult * region_mult.get(r, 1.0) for r in REGIONS},
         }
     sites = {j: {**SITES[j], "node_price": SITES[j]["node_price"] * cost_mult} for j in REGIONS}
-    return {"scenario": sc["name"], "budget": budget, "services": services, "sites": sites,
+    return {"scenario": sc["name"], "budget": budget, "services": out, "sites": sites,
             "max_total_nodes": MAX_TOTAL_NODES}
 
 

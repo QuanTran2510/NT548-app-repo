@@ -28,6 +28,8 @@ jobs:
       - run: pip install -r requirements.txt
       - run: python tests/test_model.py
       - run: python tests/test_exporter.py
+      - run: python tests/test_catalog.py
+      - run: python tests/test_portal.py
 
   build:
     needs: test

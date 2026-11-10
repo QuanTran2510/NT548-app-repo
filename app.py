@@ -1,11 +1,14 @@
+import os
 import time
 
 from flask import Flask, Response, jsonify, render_template, request
 
 import metrics
 from data import DEFAULT_BUDGET, LATENCY, REGIONS, SERVICES, SITES, list_scenarios
+from catalog import CATALOG_REL, load_catalog
 from exporter import ExportError, plan
 from model import build_instance, solve
+from portal import (CatalogCache, PortalError, github_open_pr, onboard, preview_in_repo, with_clone)
 from sensitivity import DEFAULT_SWEEPS, sweep
 
 
@@ -19,9 +22,16 @@ def _params():
     return p
 
 
+PORTAL_REPO = os.environ.get("PORTAL_REPO", "")        # "owner/name" of the config-repo
+PORTAL_TOKEN = os.environ.get("GITHUB_TOKEN", "")      # fine-grained PAT: contents + pull requests (read/write)
+_cache = CatalogCache(lambda: with_clone(PORTAL_REPO, PORTAL_TOKEN, lambda p: load_catalog(p / CATALOG_REL))) if PORTAL_REPO else None
+
+
 def _instance(p):
     """ap_demand scales only ap-southeast demand (same meaning as in the sweeps)."""
     p = dict(p)
+    if _cache:
+        p["services"] = _cache.services()          # built-in services + those onboarded through the portal
     ap = float(request.args.get("ap_demand", 1))
     if ap != 1:
         p["region_mult"] = {"ap-southeast": ap}
@@ -47,6 +57,42 @@ def create_app():
     def index():
         return render_template("index.html", regions=REGIONS, services=SERVICES, sites=SITES, latency=LATENCY,
                                budget=DEFAULT_BUDGET, sweeps=list(DEFAULT_SWEEPS), scenarios=list_scenarios())
+
+    @app.get("/portal")
+    def portal_page():
+        return render_template("portal.html", scenarios=list(list_scenarios()),
+                               can_submit=bool(PORTAL_REPO and PORTAL_TOKEN), repo=PORTAL_REPO)
+
+    def _portal_request():
+        body = request.get_json(silent=True) or {}
+        scenario = body.pop("scenario", "normal")
+        return body, scenario
+
+    @app.post("/api/portal/preview")
+    def portal_preview():
+        spec, scenario = _portal_request()
+        try:
+            def run(catalog_dir):
+                return preview_in_repo(spec, scenario, load_catalog(catalog_dir))
+            if PORTAL_REPO:
+                out = with_clone(PORTAL_REPO, PORTAL_TOKEN, lambda p: run(p / CATALOG_REL))
+            else:
+                out = run("/nonexistent")                   # no repo configured: built-in services only
+            return jsonify({"ok": True, "preview": out})
+        except PortalError as e:
+            return jsonify({"ok": False, "errors": e.messages}), 400
+
+    @app.post("/api/portal/submit")
+    def portal_submit():
+        if not (PORTAL_REPO and PORTAL_TOKEN):
+            return jsonify({"ok": False, "errors": ["the portal cannot open pull requests: PORTAL_REPO / GITHUB_TOKEN are not configured"]}), 503
+        spec, scenario = _portal_request()
+        try:
+            branch, url = with_clone(PORTAL_REPO, PORTAL_TOKEN,
+                                     lambda p: onboard(spec, scenario, p, github_open_pr(PORTAL_REPO, PORTAL_TOKEN)))
+            return jsonify({"ok": True, "branch": branch, "pull_request": url})
+        except (PortalError, ExportError) as e:
+            return jsonify({"ok": False, "errors": getattr(e, "messages", [str(e)])}), 400
 
     @app.get("/api/scenarios")
     def api_scenarios():

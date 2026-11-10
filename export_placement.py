@@ -8,6 +8,7 @@ import argparse
 import sys
 
 from data import DEFAULT_BUDGET, list_scenarios
+from catalog import CATALOG_REL, load_catalog, merged_services
 from exporter import ExportError, git_commit, plan, propose, read_current, summary_markdown, write_all
 from model import build_instance, solve
 
@@ -33,6 +34,10 @@ def main(argv=None, run=None):
               budget=a.budget, active_ratio=a.active_ratio)
     if a.ap_demand != 1:
         kw["region_mult"] = {"ap-southeast": a.ap_demand}
+    catalog = load_catalog(f"{a.config_repo}/{CATALOG_REL}")
+    if catalog:
+        print(f"catalog: {len(catalog)} onboarded service(s): {', '.join(sorted(catalog))}")
+    kw["services"] = merged_services(catalog)
     res = solve(build_instance(**kw), a.solver)
     print(f"scenario={res.get('scenario', a.scenario)} solver={res['solver']} status={res['status']}")
     if res["status"] != "ok":

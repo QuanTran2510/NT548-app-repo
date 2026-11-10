@@ -1,6 +1,7 @@
 FROM python:3.12-slim
 ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 HOME=/home/appuser
-RUN apt-get update && apt-get upgrade -y && rm -rf /var/lib/apt/lists/*
+ENV GIT_AUTHOR_NAME=placement-optimiser GIT_AUTHOR_EMAIL=placement-optimiser@users.noreply.github.com GIT_COMMITTER_NAME=placement-optimiser GIT_COMMITTER_EMAIL=placement-optimiser@users.noreply.github.com
+RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends git ca-certificates && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt

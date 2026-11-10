@@ -184,20 +184,35 @@ def default_run(args, cwd=None):
     return subprocess.run(args, capture_output=True, text=True, check=True, cwd=cwd)
 
 
-def git_commit(config_repo, message, run=default_run):
-    """Stage envs/ and infra/terraform/nodes.auto.tfvars.json; commit if something changed."""
+def git_commit(config_repo, message, run=default_run, paths=()):
+    """Stage envs/, the node file and any extra paths; commit if something changed."""
     git = lambda *a: run(["git", "-C", str(config_repo), *a])
     git("add", "-A", "envs")
     if (Path(config_repo) / NODES_FILE).exists():
         git("add", str(NODES_FILE))
+    for p in paths:
+        git("add", "-A", str(p))
     if not git("status", "--porcelain").stdout.strip():
         return False
     git("commit", "-m", message)
     return True
 
 
-def propose(result, config_repo, base=None, run=default_run):
-    """Branch -> write files -> commit -> push -> open a pull request. Returns (branch, pr_url)."""
+def gh_cli_open_pr(repo):
+    """Default way to open the PR: the GitHub CLI, run inside the checkout."""
+    def open_pr(base, branch, title, body, run=default_run):
+        pr = run(["gh", "pr", "create", "--base", base, "--head", branch, "--title", title, "--body", body], cwd=repo)
+        return pr.stdout.strip().splitlines()[-1] if pr.stdout.strip() else ""
+    return open_pr
+
+
+def propose(result, config_repo, base=None, run=default_run, *, open_pr=None, branch_prefix=None, title=None,
+            body_prefix="", write_extra=None, extra_paths=()):
+    """Branch -> write files -> commit -> push -> open a pull request. Returns (branch, pr_url).
+
+    open_pr(base, branch, title, body) -> url   (default: `gh pr create`)
+    write_extra(repo_path)                      writes additional files on the branch (the portal's catalog entry)
+    """
     repo = str(config_repo)
     git = lambda *a: run(["git", "-C", repo, *a])
     if git("status", "--porcelain").stdout.strip():
@@ -205,20 +220,24 @@ def propose(result, config_repo, base=None, run=default_run):
     base = base or git("rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
     plan_envs(result), plan_nodes(result)                                  # fail before creating a branch
     before_pods, before_nodes = read_current(config_repo)
-    branch = f"placement/{result.get('scenario', 'plan')}-{time.strftime('%Y%m%d-%H%M%S')}"
+    branch = f"{branch_prefix or 'placement/' + str(result.get('scenario', 'plan'))}-{time.strftime('%Y%m%d-%H%M%S')}"
     git("checkout", "-b", branch)
     try:
         write_all(result, config_repo)
-        title = (f"placement({result.get('scenario')}): nodes {list(result['nodes'].values())}, "
-                 f"${result['cost']}/h, {result['mean_latency_ms']} ms")
-        if not git_commit(config_repo, title, run):
+        if write_extra:
+            write_extra(Path(config_repo))
+        title = title or (f"placement({result.get('scenario')}): nodes {list(result['nodes'].values())}, "
+                          f"${result['cost']}/h, {result['mean_latency_ms']} ms")
+        if not git_commit(config_repo, title, run, paths=extra_paths):
             git("checkout", base)
             git("branch", "-D", branch)
             return None, None
         git("push", "-u", "origin", branch)
-        body = summary_markdown(result, before_pods, before_nodes)
-        pr = run(["gh", "pr", "create", "--base", base, "--head", branch, "--title", title, "--body", body],
-                 cwd=repo)          # gh finds the GitHub repo from the checkout in cwd
-        return branch, pr.stdout.strip().splitlines()[-1] if pr.stdout.strip() else ""
+        body = body_prefix + summary_markdown(result, before_pods, before_nodes)
+        if open_pr is None:
+            url = gh_cli_open_pr(repo)(base, branch, title, body, run=run)
+        else:
+            url = open_pr(base, branch, title, body)
+        return branch, url
     finally:
         git("checkout", base)

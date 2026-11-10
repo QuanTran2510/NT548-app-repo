@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Service portal</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+ body{font-family:system-ui,sans-serif;max-width:900px;margin:2rem auto;padding:0 1rem;color:#1b1f24}
+ fieldset{border:1px solid #c9d1d9;border-radius:6px;margin-bottom:1rem}
+ label{display:inline-block;margin:.4rem 1rem .4rem 0;font-size:.9rem} input,select{display:block;padding:.35rem;width:13rem}
+ input.wide{width:26rem} button{padding:.5rem 1rem;margin-right:.5rem;cursor:pointer}
+ table{border-collapse:collapse;margin:.5rem 0} td,th{border:1px solid #c9d1d9;padding:.3rem .6rem;text-align:left}
+ .err{color:#a40e26} .ok{color:#116329} .muted{color:#57606a;font-size:.85rem}
+</style></head><body>
+<h1>Onboard a service</h1>
+<p class="muted">Describe the service; the optimiser decides where its pods run and whether the platform needs more nodes.
+Submitting opens a pull request{% if repo %} in <b>{{ repo }}</b>{% endif %}; nothing is deployed until a platform engineer merges it.</p>
+<form id="f" onsubmit="return false">
+<fieldset><legend>Service</legend>
+ <label>Name<input id="name" placeholder="shop-cart" required></label>
+ <label>Owner (team)<input id="owner" placeholder="team-shop"></label>
+ <label>Image repository<input id="repo" class="wide" value="docker.io/nginxinc/nginx-unprivileged"></label>
+ <label>Image tag<input id="tag" value="1.27-alpine"></label>
+ <label>Container port<input id="port" type="number" value="8080"></label>
+ <label>Health path<input id="health_path" value="/"></label>
+</fieldset>
+<fieldset><legend>What the optimiser needs to know</legend>
+ <label>SLO (ms)<input id="slo_ms" type="number" value="150"></label>
+ <label>Capacity per pod (req/s)<input id="capacity" type="number" value="120"></label>
+ <label>RAM per pod (Mi)<input id="mem_mi" type="number" value="96"></label>
+ <label>Requests per active user (/s)<input id="rps_per_active_user" type="number" step="0.01" value="0.1"></label>
+ <label>Min replicas<input id="min_replicas" type="number" value="2"></label>
+ <label>Plan for scenario<select id="scenario">{% for s in scenarios %}<option>{{ s }}</option>{% endfor %}</select></label>
+</fieldset>
+<button id="preview">Preview placement</button>
+<button id="submit" {% if not can_submit %}disabled title="PORTAL_REPO / GITHUB_TOKEN are not configured"{% endif %}>Open pull request</button>
+</form>
+<div id="out"></div>
+<script>
+const $ = id => document.getElementById(id);
+function spec() {
+  const n = id => $(id).value;
+  return {name: n("name"), owner: n("owner"), image: {repository: n("repo"), tag: n("tag")}, port: n("port"),
+          health_path: n("health_path"), slo_ms: n("slo_ms"), capacity: n("capacity"), mem_mi: n("mem_mi"),
+          rps_per_active_user: n("rps_per_active_user"), min_replicas: n("min_replicas"), scenario: n("scenario")};
+}
+async function call(path) {
+  $("out").innerHTML = "<p class='muted'>working...</p>";
+  const r = await fetch(path, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(spec())});
+  return [r.ok, await r.json()];
+}
+function nodes(o) { return o ? Object.entries(o).map(([k, v]) => `${k} ${v}`).join(", ") : "-"; }
+function show(ok, j) {
+  if (!ok) { $("out").innerHTML = "<h3 class='err'>Cannot continue</h3><ul>" + j.errors.map(e => `<li class='err'>${e}</li>`).join("") + "</ul>"; return; }
+  if (j.pull_request) { $("out").innerHTML = `<h3 class='ok'>Pull request opened</h3><p><a href="${j.pull_request}" target="_blank">${j.pull_request}</a></p><p class="muted">Branch ${j.branch}. A platform engineer reviews and merges it.</p>`; return; }
+  const p = j.preview;
+  $("out").innerHTML = `<h3 class='ok'>Placement found (scenario ${p.scenario})</h3>
+   <table><tr><th>Pods of ${p.service}</th><td>${Object.entries(p.pods).map(([k, v]) => `${k} ×${v}`).join(", ")}</td></tr>
+   <tr><th>Nodes before</th><td>${nodes(p.nodes_before)}</td></tr><tr><th>Nodes after</th><td>${nodes(p.nodes_after)}</td></tr>
+   <tr><th>Node cost</th><td>${p.cost_before ?? "-"} → ${p.cost_after} $/h</td></tr>
+   <tr><th>Mean latency (model)</th><td>${p.latency_after_ms} ms</td></tr></table>`;
+}
+$("preview").onclick = async () => show(...await call("/api/portal/preview"));
+$("submit").onclick = async () => show(...await call("/api/portal/submit"));
+</script></body></html>

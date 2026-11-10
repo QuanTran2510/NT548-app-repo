@@ -1,0 +1,171 @@
+import json
+import os
+import subprocess
+import sys
+import tempfile
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from catalog import CATALOG_REL, load_catalog
+from exporter import NODES_FILE, default_run
+from portal import (CatalogCache, PortalError, clone, evaluate, github_open_pr, onboard, scrub)
+
+SPEC = {"name": "shop-cart", "owner": "team-shop",
+        "image": {"repository": "docker.io/nginxinc/nginx-unprivileged", "tag": "1.27-alpine"}, "port": 8080,
+        "health_path": "/", "slo_ms": 150, "capacity": 120, "mem_mi": 96, "rps_per_active_user": 0.1, "min_replicas": 2}
+
+
+def git(d, *a):
+    return subprocess.run(["git", "-C", str(d), *a], capture_output=True, text=True, check=True).stdout.strip()
+
+
+def repo_with_remote(tmp):
+    remote, repo = Path(tmp) / "remote.git", Path(tmp) / "config-repo"
+    subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(remote)], check=True)
+    subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
+    for k, v in (("user.email", "t@t"), ("user.name", "t")):
+        git(repo, "config", k, v)
+    (repo / "README.md").write_text("x\n")
+    git(repo, "add", "-A"); git(repo, "commit", "-m", "init")
+    git(repo, "remote", "add", "origin", str(remote)); git(repo, "push", "-u", "origin", "main")
+    return repo, remote
+
+
+def test_evaluate_rejects_bad_and_duplicate_requests():
+    for bad in ({**SPEC, "name": "web-api"}, {**SPEC, "image": {"repository": "evil.io/x", "tag": "1"}}):
+        try:
+            evaluate(bad, "normal", {}, solver="exhaustive")
+            assert False
+        except PortalError as e:
+            assert e.messages
+    spec, before, after = evaluate(SPEC, "normal", {}, solver="exhaustive")
+    assert after["status"] == "ok" and "shop-cart" in after["placement"] and "shop-cart" not in before["placement"]
+
+
+def test_unplaceable_service_is_refused_without_creating_anything():
+    with tempfile.TemporaryDirectory() as tmp:
+        repo, remote = repo_with_remote(tmp)
+        impossible = {**SPEC, "slo_ms": 10}                      # below the 20 ms local latency: no site can serve it
+        try:
+            onboard(impossible, "normal", repo, open_pr=lambda *a: "never", solver="exhaustive")
+            assert False
+        except PortalError as e:
+            assert "no placement fits" in str(e)
+        assert git(repo, "branch", "--list").count("onboard/") == 0 and git(remote, "branch", "--list").count("onboard/") == 0
+
+
+def test_onboard_opens_a_pr_with_catalog_apps_envs_and_nodes():
+    with tempfile.TemporaryDirectory() as tmp:
+        repo, remote = repo_with_remote(tmp)
+        opened = {}
+
+        def open_pr(base, branch, title, body):
+            opened.update(base=base, branch=branch, title=title, body=body)
+            return "https://github.com/u/config-repo/pull/9"
+
+        branch, url = onboard(SPEC, "normal", repo, open_pr, solver="exhaustive")
+        assert url.endswith("/pull/9") and branch.startswith("onboard/shop-cart-") and opened["base"] == "main"
+        assert git(repo, "rev-parse", "--abbrev-ref", "HEAD") == "main" and not (repo / CATALOG_REL).exists()   # main untouched
+        files = git(remote, "ls-tree", "-r", "--name-only", branch).split()
+        assert "catalog/services/shop-cart.json" in files and "apps/shop-cart/values.yaml" in files
+        assert str(NODES_FILE) in files and any(f.startswith("envs/shop-cart-") for f in files)
+        entry = json.loads(git(remote, "show", f"{branch}:catalog/services/shop-cart.json"))
+        assert entry["mem_mi"] == 96 and entry["owner"] == "team-shop"
+        env = git(remote, "show", f"{branch}:{[f for f in files if f.startswith('envs/shop-cart-')][0]}")
+        assert "memory: 96Mi" in env and "service: shop-cart" in env
+        assert "New service `shop-cart`" in opened["body"] and "| SLO | 150 ms |" in opened["body"] and "### Nodes" in opened["body"]
+        assert opened["title"].startswith("onboard(shop-cart):")
+
+
+def test_second_service_sees_the_first_one_in_the_catalog():
+    with tempfile.TemporaryDirectory() as tmp:
+        repo, remote = repo_with_remote(tmp)
+        branch, _ = onboard(SPEC, "normal", repo, lambda *a: "u", solver="exhaustive")
+        git(repo, "merge", "--no-edit", branch); git(repo, "push", "origin", "main")        # "merge the PR"
+        assert "shop-cart" in load_catalog(repo / CATALOG_REL)
+        try:
+            onboard(SPEC, "normal", repo, lambda *a: "u", solver="exhaustive")               # same name again
+            assert False
+        except PortalError as e:
+            assert "already exists" in str(e)
+        second = {**SPEC, "name": "shop-search"}
+        branch2, _ = onboard(second, "normal", repo, lambda *a: "u", solver="exhaustive")
+        files = git(remote, "ls-tree", "-r", "--name-only", branch2).split()
+        assert any(f.startswith("envs/shop-cart-") for f in files) and any(f.startswith("envs/shop-search-") for f in files)
+
+
+def test_token_is_scrubbed_from_errors():
+    assert "SECRET" not in scrub("fatal: https://x-access-token:SECRET@github.com/o/r.git not found", "SECRET")
+    try:
+        clone("https://x-access-token:SECRETTOKEN@127.0.0.1:1/none.git", "/tmp/never-created-dir", token="SECRETTOKEN")
+        assert False
+    except PortalError as e:
+        assert "SECRETTOKEN" not in str(e)
+
+
+class _FakeGitHub(BaseHTTPRequestHandler):
+    seen = {}
+
+    def do_POST(self):
+        body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        _FakeGitHub.seen = {"path": self.path, "auth": self.headers["Authorization"], "body": body}
+        if body["head"] == "refuse":
+            self.send_response(422); self.end_headers(); self.wfile.write(b'{"message":"bad token SECRETTOKEN"}'); return
+        self.send_response(201); self.end_headers(); self.wfile.write(json.dumps({"html_url": "https://github.com/o/r/pull/3"}).encode())
+
+    def log_message(self, *a):
+        pass
+
+
+def test_github_api_pull_request_call():
+    srv = HTTPServer(("127.0.0.1", 0), _FakeGitHub)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        open_pr = github_open_pr("o/r", "SECRETTOKEN", api_base=f"http://127.0.0.1:{srv.server_port}")
+        assert open_pr("main", "onboard/x", "title", "body") == "https://github.com/o/r/pull/3"
+        seen = _FakeGitHub.seen
+        assert seen["path"] == "/repos/o/r/pulls" and seen["auth"] == "Bearer SECRETTOKEN"
+        assert seen["body"] == {"title": "title", "head": "onboard/x", "base": "main", "body": "body"}
+        try:
+            open_pr("main", "refuse", "t", "b")
+            assert False
+        except PortalError as e:
+            assert "422" in str(e) and "SECRETTOKEN" not in str(e)
+    finally:
+        srv.shutdown()
+
+
+def test_catalog_cache_keeps_last_good_copy_when_github_fails():
+    state = {"calls": 0, "fail": False}
+
+    def loader():
+        state["calls"] += 1
+        if state["fail"]:
+            raise RuntimeError("github down")
+        return {"shop-cart": {"name": "shop-cart", **{k: SPEC[k] for k in ("slo_ms", "capacity", "mem_mi", "rps_per_active_user", "min_replicas")}}}
+
+    cache = CatalogCache(loader, ttl=0)
+    assert "shop-cart" in cache.services()
+    state["fail"] = True
+    assert "shop-cart" in cache.services() and state["calls"] == 2                      # served from the last good copy
+    assert "realtime-chat" in CatalogCache(lambda: (_ for _ in ()).throw(RuntimeError()), ttl=0).services()   # built-ins survive
+
+
+def test_http_endpoints_preview_errors_and_disabled_submit():
+    import app as A                                           # no PORTAL_REPO / GITHUB_TOKEN in the test environment
+    c = A.app.test_client()
+    assert c.get("/portal").status_code == 200
+    ok = c.post("/api/portal/preview", json={**SPEC, "scenario": "normal"})
+    assert ok.status_code == 200 and ok.get_json()["preview"]["service"] == "shop-cart"
+    bad = c.post("/api/portal/preview", json={**SPEC, "name": "Bad_Name", "scenario": "normal"})
+    assert bad.status_code == 400 and bad.get_json()["errors"]
+    assert c.post("/api/portal/submit", json=SPEC).status_code == 503
+
+
+if __name__ == "__main__":
+    for name, fn in list(globals().items()):
+        if name.startswith("test_"):
+            fn()
+            print("ok", name)
