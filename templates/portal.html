@@ -12,6 +12,8 @@
 <h1>Onboard a service</h1>
 <p class="muted">Describe the service; the optimiser decides where its pods run and whether the platform needs more nodes.
 Submitting opens a pull request{% if repo %} in <b>{{ repo }}</b>{% endif %}; nothing is deployed until a platform engineer merges it.</p>
+{% if not can_submit %}<p class="err"><b>Pull requests are disabled:</b> this pod has no PORTAL_REPO / GITHUB_TOKEN
+ (create the <code>portal-github</code> Secret and restart the pod). You can still use Preview.</p>{% endif %}
 <form id="f" onsubmit="return false">
 <fieldset><legend>Service</legend>
  <label>Name<input id="name" placeholder="shop-cart" required></label>
@@ -42,13 +44,19 @@ function spec() {
           rps_per_active_user: n("rps_per_active_user"), min_replicas: n("min_replicas"), scenario: n("scenario")};
 }
 async function call(path) {
-  $("out").innerHTML = "<p class='muted'>working...</p>";
-  const r = await fetch(path, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(spec())});
-  return [r.ok, await r.json()];
+  $("out").innerHTML = "<p class='muted'>working... (cloning the config-repo and solving takes a few seconds)</p>";
+  try {
+    const r = await fetch(path, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(spec())});
+    let j;
+    try { j = await r.json(); } catch (e) { j = {errors: [`The server answered HTTP ${r.status} without a JSON body. Check the pod log.`]}; }
+    return [r.ok, j];
+  } catch (e) {
+    return [false, {errors: ["Could not reach the server: " + e]}];
+  }
 }
 function nodes(o) { return o ? Object.entries(o).map(([k, v]) => `${k} ${v}`).join(", ") : "-"; }
 function show(ok, j) {
-  if (!ok) { $("out").innerHTML = "<h3 class='err'>Cannot continue</h3><ul>" + j.errors.map(e => `<li class='err'>${e}</li>`).join("") + "</ul>"; return; }
+  if (!ok) { const errs = j.errors || [j.reason || "unexpected error"]; $("out").innerHTML = "<h3 class='err'>Cannot continue</h3><ul>" + errs.map(e => `<li class='err'>${e}</li>`).join("") + "</ul>"; return; }
   if (j.pull_request) { $("out").innerHTML = `<h3 class='ok'>Pull request opened</h3><p><a href="${j.pull_request}" target="_blank">${j.pull_request}</a></p><p class="muted">Branch ${j.branch}. A platform engineer reviews and merges it.</p>`; return; }
   const p = j.preview;
   $("out").innerHTML = `<h3 class='ok'>Placement found (scenario ${p.scenario})</h3>

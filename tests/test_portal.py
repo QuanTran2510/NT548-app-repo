@@ -164,6 +164,56 @@ def test_http_endpoints_preview_errors_and_disabled_submit():
     assert c.post("/api/portal/submit", json=SPEC).status_code == 503
 
 
+def test_missing_git_binary_is_a_readable_error():
+    def no_git(args, cwd=None):
+        raise FileNotFoundError(2, "No such file or directory", "git")
+    try:
+        clone("https://example.invalid/x.git", "/tmp/never-created", run=no_git)
+        assert False
+    except PortalError as e:
+        assert "git is not installed" in str(e)
+
+
+def test_failed_push_becomes_a_portal_error_with_a_hint_and_no_token():
+    with tempfile.TemporaryDirectory() as tmp:
+        repo, remote = repo_with_remote(tmp)
+
+        def run(args, cwd=None):
+            if "push" in args:
+                raise subprocess.CalledProcessError(128, args, stderr="remote: Permission to o/r.git denied to u. SECRETTOKEN")
+            return default_run(args, cwd)
+
+        try:
+            onboard(SPEC, "normal", repo, lambda *a: "never", solver="exhaustive", run=run, token="SECRETTOKEN")
+            assert False
+        except PortalError as e:
+            assert "Contents: read and write" in str(e) and "SECRETTOKEN" not in str(e)
+        assert git(repo, "rev-parse", "--abbrev-ref", "HEAD") == "main"                      # back on main, nothing half-done
+
+
+def test_http_portal_failures_are_always_json_with_errors():
+    import app as A
+    c = A.app.test_client()
+    saved = (A.PORTAL_REPO, A.PORTAL_TOKEN, A.with_clone)
+    try:
+        A.PORTAL_REPO, A.PORTAL_TOKEN = "o/r", "SECRETTOKEN"
+        for boom in (RuntimeError("kaboom SECRETTOKEN"), FileNotFoundError(2, "No such file", "git"),
+                     subprocess.CalledProcessError(1, ["git", "x"], stderr="fatal")):
+            def fail(*a, _b=boom, **k):
+                raise _b
+            A.with_clone = fail
+            for path in ("/api/portal/submit", "/api/portal/preview"):
+                r = c.post(path, json={**SPEC, "scenario": "normal"})
+                j = r.get_json()
+                assert j is not None and j["ok"] is False and j["errors"], (path, boom, r.status_code)
+                assert "SECRETTOKEN" not in json.dumps(j) and "unknown scenario" not in json.dumps(j)
+        A.with_clone = saved[2]
+        r = c.post("/api/portal/preview", json={**SPEC, "scenario": "nope"})
+        assert r.status_code == 400 and "unknown scenario" in r.get_json()["errors"][0]
+    finally:
+        A.PORTAL_REPO, A.PORTAL_TOKEN, A.with_clone = saved
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):

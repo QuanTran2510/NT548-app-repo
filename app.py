@@ -8,7 +8,7 @@ from data import DEFAULT_BUDGET, LATENCY, REGIONS, SERVICES, SITES, list_scenari
 from catalog import CATALOG_REL, load_catalog
 from exporter import ExportError, plan
 from model import build_instance, solve
-from portal import (CatalogCache, PortalError, github_open_pr, onboard, preview_in_repo, with_clone)
+from portal import (CatalogCache, PortalError, github_open_pr, onboard, preview_in_repo, scrub, with_clone)
 from sensitivity import DEFAULT_SWEEPS, sweep
 
 
@@ -50,8 +50,12 @@ def create_app():
     app = Flask(__name__)
 
     @app.errorhandler(FileNotFoundError)
-    def unknown_scenario(e):
-        return jsonify({"status": "error", "reason": f"unknown scenario; choose one of {list(list_scenarios())}"}), 400
+    def missing_file(e):
+        if "scenarios" in str(getattr(e, "filename", "")):
+            reason = f"unknown scenario; choose one of {list(list_scenarios())}"
+        else:
+            reason = f"file not found: {getattr(e, 'filename', None) or e}"
+        return jsonify({"status": "error", "reason": reason, "errors": [reason]}), 400
 
     @app.get("/")
     def index():
@@ -68,10 +72,18 @@ def create_app():
         scenario = body.pop("scenario", "normal")
         return body, scenario
 
+    def _portal_unexpected(e):
+        """Never a bare HTML 500: the page must be able to show what went wrong. Details go to the pod log."""
+        app.logger.exception("portal request failed")
+        msg = scrub(f"{type(e).__name__}: {e}", PORTAL_TOKEN)[:250]
+        return jsonify({"ok": False, "errors": [f"unexpected error ({msg}). See: kubectl logs deploy/placement-optimiser-eu-west -n placement-optimiser"]}), 500
+
     @app.post("/api/portal/preview")
     def portal_preview():
         spec, scenario = _portal_request()
         try:
+            if scenario not in list_scenarios():
+                raise PortalError(f"unknown scenario '{scenario}'; choose one of {list(list_scenarios())}")
             def run(catalog_dir):
                 return preview_in_repo(spec, scenario, load_catalog(catalog_dir))
             if PORTAL_REPO:
@@ -81,6 +93,8 @@ def create_app():
             return jsonify({"ok": True, "preview": out})
         except PortalError as e:
             return jsonify({"ok": False, "errors": e.messages}), 400
+        except Exception as e:                                    # noqa: BLE001
+            return _portal_unexpected(e)
 
     @app.post("/api/portal/submit")
     def portal_submit():
@@ -88,11 +102,17 @@ def create_app():
             return jsonify({"ok": False, "errors": ["the portal cannot open pull requests: PORTAL_REPO / GITHUB_TOKEN are not configured"]}), 503
         spec, scenario = _portal_request()
         try:
+            if scenario not in list_scenarios():
+                raise PortalError(f"unknown scenario '{scenario}'; choose one of {list(list_scenarios())}")
             branch, url = with_clone(PORTAL_REPO, PORTAL_TOKEN,
-                                     lambda p: onboard(spec, scenario, p, github_open_pr(PORTAL_REPO, PORTAL_TOKEN)))
+                                     lambda p: onboard(spec, scenario, p, github_open_pr(PORTAL_REPO, PORTAL_TOKEN), token=PORTAL_TOKEN))
+            if not branch:
+                raise PortalError("nothing to propose: the config-repo already contains this service")
             return jsonify({"ok": True, "branch": branch, "pull_request": url})
         except (PortalError, ExportError) as e:
             return jsonify({"ok": False, "errors": getattr(e, "messages", [str(e)])}), 400
+        except Exception as e:                                    # noqa: BLE001
+            return _portal_unexpected(e)
 
     @app.get("/api/scenarios")
     def api_scenarios():

@@ -17,7 +17,7 @@ from pathlib import Path
 from catalog import (CATALOG_REL, app_values_yaml, catalog_json, load_catalog, merged_services, model_spec,
                      normalize, validate)
 from data import SERVICES
-from exporter import default_run, propose, read_current
+from exporter import ExportError, default_run, propose, read_current
 from model import build_instance, solve
 
 
@@ -36,6 +36,8 @@ def scrub(text, token):
 def clone(url, dest, token=None, run=default_run):
     try:
         run(["git", "clone", "--depth", "1", "--quiet", url, str(dest)])
+    except FileNotFoundError:
+        raise PortalError("git is not installed in this container image: rebuild the image from the updated Dockerfile")
     except subprocess.CalledProcessError as e:
         raise PortalError("could not clone the config-repo: " + scrub(e.stderr or e, token).strip()[:300])
     return Path(dest)
@@ -99,7 +101,17 @@ def _spec_table(spec):
     return "| field | value |\n|---|---|\n" + "\n".join(f"| {k} | {v} |" for k, v in rows)
 
 
-def onboard(spec, scenario, repo_dir, open_pr, solver="auto", run=default_run):
+def _git_failure(e, token):
+    """A failed git command as a message a developer can act on."""
+    detail = scrub((e.stderr or str(e)), token).strip()
+    cmd = " ".join(e.cmd[3:5]) if isinstance(e.cmd, (list, tuple)) and len(e.cmd) > 4 else "git"
+    hint = ""
+    if "push" in cmd and any(w in detail.lower() for w in ("403", "denied", "permission", "authentication", "not found")):
+        hint = " (the token needs Contents: read and write on the config-repo)"
+    return f"git step failed ({cmd}){hint}: {detail[-250:]}"
+
+
+def onboard(spec, scenario, repo_dir, open_pr, solver="auto", run=default_run, token=None):
     """Create the pull request in a checkout of the config-repo. Returns (branch, url)."""
     repo_dir = Path(repo_dir)
     catalog = load_catalog(repo_dir / CATALOG_REL)
@@ -116,8 +128,13 @@ def onboard(spec, scenario, repo_dir, open_pr, solver="auto", run=default_run):
     title = f"onboard({name}): {added:+d} node(s), ${after['cost']}/h"
     body = (f"## New service `{name}` (requested through the portal)\n\n{_spec_table(spec)}\n\n"
             f"The platform was re-optimised for scenario `{scenario}` with this service included.\n\n")
-    return propose(after, repo_dir, run=run, open_pr=open_pr, branch_prefix=f"onboard/{name}", title=title,
-                   body_prefix=body, write_extra=write_extra, extra_paths=[CATALOG_REL, f"apps/{name}"])
+    try:
+        return propose(after, repo_dir, run=run, open_pr=open_pr, branch_prefix=f"onboard/{name}", title=title,
+                       body_prefix=body, write_extra=write_extra, extra_paths=[CATALOG_REL, f"apps/{name}"])
+    except subprocess.CalledProcessError as e:
+        raise PortalError(_git_failure(e, token))
+    except ExportError as e:
+        raise PortalError(str(e))
 
 
 class CatalogCache:
