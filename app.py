@@ -70,7 +70,8 @@ def create_app():
     def _portal_request():
         body = request.get_json(silent=True) or {}
         scenario = body.pop("scenario", "normal")
-        return body, scenario
+        solver = body.pop("solver", "auto") 
+        return body, scenario, solver
 
     def _portal_unexpected(e):
         """Never a bare HTML 500: the page must be able to show what went wrong. Details go to the pod log."""
@@ -80,15 +81,15 @@ def create_app():
 
     @app.post("/api/portal/preview")
     def portal_preview():
-        spec, scenario = _portal_request()
+        spec, scenario, solver = _portal_request() 
         try:
             if scenario not in list_scenarios():
                 raise PortalError(f"unknown scenario '{scenario}'; choose one of {list(list_scenarios())}")
             if PORTAL_REPO:
                 out = with_clone(PORTAL_REPO, PORTAL_TOKEN,
-                                 lambda p: preview_in_repo(spec, scenario, load_catalog(p / CATALOG_REL), repo_dir=p))
+                                 lambda p: preview_in_repo(spec, scenario, load_catalog(p / CATALOG_REL), solver=solver, repo_dir=p))
             else:
-                out = preview_in_repo(spec, scenario, {})   # no repo configured: an empty platform
+                out = preview_in_repo(spec, scenario, {}, solver=solver)   # no repo configured: an empty platform
             return jsonify({"ok": True, "preview": out})
         except PortalError as e:
             return jsonify({"ok": False, "errors": e.messages}), 400
@@ -99,12 +100,12 @@ def create_app():
     def portal_submit():
         if not (PORTAL_REPO and PORTAL_TOKEN):
             return jsonify({"ok": False, "errors": ["the portal cannot open pull requests: PORTAL_REPO / GITHUB_TOKEN are not configured"]}), 503
-        spec, scenario = _portal_request()
+        spec, scenario, solver = _portal_request() 
         try:
             if scenario not in list_scenarios():
                 raise PortalError(f"unknown scenario '{scenario}'; choose one of {list(list_scenarios())}")
             branch, url = with_clone(PORTAL_REPO, PORTAL_TOKEN,
-                                     lambda p: onboard(spec, scenario, p, github_open_pr(PORTAL_REPO, PORTAL_TOKEN), token=PORTAL_TOKEN))
+                                     lambda p: onboard(spec, scenario, p, github_open_pr(PORTAL_REPO, PORTAL_TOKEN), solver=solver, token=PORTAL_TOKEN))
             if not branch:
                 raise PortalError("nothing to propose: the config-repo already contains this service")
             return jsonify({"ok": True, "branch": branch, "pull_request": url})

@@ -30,6 +30,7 @@
  <label>Requests per active user (/s)<input id="rps_per_active_user" type="number" step="0.01" value="0.1"></label>
  <label>Min replicas<input id="min_replicas" type="number" value="2"></label>
  <label>Size the new service for<select id="scenario">{% for s in scenarios %}<option {{ "selected" if s == "normal" else "" }}>{{ s }}</option>{% endfor %}</select></label>
+ <label>Solver<select id="solver"><option value="auto">auto</option><option value="ilp">ilp</option><option value="greedy">greedy</option><option value="exhaustive">exhaustive</option></select></label>
 </fieldset>
 <button id="preview">Preview placement</button>
 <button id="submit" {% if not can_submit %}disabled title="PORTAL_REPO / GITHUB_TOKEN are not configured"{% endif %}>Open pull request</button>
@@ -41,7 +42,8 @@ function spec() {
   const n = id => $(id).value;
   return {name: n("name"), owner: n("owner"), image: {repository: n("repo"), tag: n("tag")}, port: n("port"),
           health_path: n("health_path"), slo_ms: n("slo_ms"), capacity: n("capacity"), mem_mi: n("mem_mi"),
-          rps_per_active_user: n("rps_per_active_user"), min_replicas: n("min_replicas"), scenario: n("scenario")};
+          rps_per_active_user: n("rps_per_active_user"), min_replicas: n("min_replicas"), scenario: n("scenario"),
+          solver: n("solver")};
 }
 async function call(path) {
   $("out").innerHTML = "<p class='muted'>working... (cloning the config-repo and solving takes a few seconds)</p>";
