@@ -9,7 +9,8 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from catalog import CATALOG_REL, load_catalog
-from exporter import NODES_FILE, default_run
+from exporter import NODES_FILE, default_run, read_current_detail, write_all
+from model import build_instance, solve_exhaustive
 from portal import (CatalogCache, PortalError, clone, evaluate, github_open_pr, onboard, scrub)
 
 SPEC = {"name": "shop-cart", "owner": "team-shop",
@@ -212,6 +213,86 @@ def test_http_portal_failures_are_always_json_with_errors():
         assert r.status_code == 400 and "unknown scenario" in r.get_json()["errors"][0]
     finally:
         A.PORTAL_REPO, A.PORTAL_TOKEN, A.with_clone = saved
+
+
+def _deploy_asia_launch(repo):
+    """A platform that is already running the asia-launch plan (the situation in which onboarding must be harmless)."""
+    write_all(solve_exhaustive(build_instance("asia-launch")), repo)
+    git(repo, "add", "-A"); git(repo, "commit", "-m", "deployed asia-launch"); git(repo, "push")
+    return read_current_detail(repo)
+
+
+def _other_services_changed(repo, branch):
+    diff = git(repo, "diff", "--name-only", f"main...origin/{branch}").split()
+    return [f for f in diff if f.startswith("envs/") and "shop-cart" not in f]
+
+
+def test_onboarding_never_resizes_existing_services_or_removes_nodes():
+    # the bug this guards against: onboarding with the quiet scenario "night" re-planned EVERY service for night
+    # traffic, cut their pods and removed a node, even though the platform was running asia-launch
+    with tempfile.TemporaryDirectory() as tmp:
+        repo, remote = repo_with_remote(tmp)
+        (detail, nodes) = _deploy_asia_launch(repo)
+        for scenario in ("night", "normal", "peak"):
+            opened = {}
+            branch, _ = onboard(SPEC, scenario, repo, lambda b, br, t, body: opened.update(body=body) or "u", solver="exhaustive")
+            after = json.loads(git(remote, "show", f"{branch}:{NODES_FILE}"))["node_counts"]
+            assert all(after[j] >= nodes[j] for j in nodes), (scenario, nodes, after)           # no node removed
+            assert _other_services_changed(repo, branch) == [], scenario                        # nothing else touched
+            files = git(remote, "ls-tree", "-r", "--name-only", branch).split()
+            assert any(f.startswith("envs/shop-cart-") for f in files) and "catalog/services/shop-cart.json" in files
+            assert "Existing services are not changed" in opened["body"]
+            assert "| realtime-chat |" not in opened["body"] and "| web-api |" not in opened["body"]
+
+
+def test_a_heavy_service_adds_nodes_but_still_leaves_others_alone():
+    with tempfile.TemporaryDirectory() as tmp:
+        repo, remote = repo_with_remote(tmp)
+        (detail, nodes) = _deploy_asia_launch(repo)
+        heavy = {**SPEC, "mem_mi": 400, "min_replicas": 4}
+        branch, _ = onboard(heavy, "normal", repo, lambda *a: "u", solver="exhaustive")
+        after = json.loads(git(remote, "show", f"{branch}:{NODES_FILE}"))["node_counts"]
+        assert sum(after.values()) > sum(nodes.values()) and all(after[j] >= nodes[j] for j in nodes)
+        assert _other_services_changed(repo, branch) == []
+
+
+def test_a_service_that_cannot_fit_is_refused_and_nothing_is_created():
+    with tempfile.TemporaryDirectory() as tmp:
+        repo, remote = repo_with_remote(tmp)
+        _deploy_asia_launch(repo)
+        try:
+            onboard({**SPEC, "mem_mi": 1000, "min_replicas": 6}, "normal", repo, lambda *a: "never", solver="exhaustive")
+            assert False
+        except PortalError as e:
+            assert "no placement fits" in str(e)
+        assert git(remote, "branch", "--list").count("onboard/") == 0
+
+
+def test_read_current_detail_returns_replicas_and_memory():
+    with tempfile.TemporaryDirectory() as tmp:
+        repo, _ = repo_with_remote(tmp)
+        res = solve_exhaustive(build_instance("normal"))
+        write_all(res, repo)
+        detail, nodes = read_current_detail(repo)
+        for service, p in res["placement"].items():
+            for site, n in p["pods"].items():
+                assert detail[(service, site)] == (n, p["mem_mi"])
+        assert nodes == res["nodes"]
+
+
+def test_two_quick_submissions_get_different_branches():
+    with tempfile.TemporaryDirectory() as tmp:
+        repo, remote = repo_with_remote(tmp)
+        b1, _ = onboard(SPEC, "normal", repo, lambda *a: "u", solver="exhaustive")
+        b2, _ = onboard(SPEC, "normal", repo, lambda *a: "u", solver="exhaustive")           # double click, same second
+        assert b1 != b2
+
+
+def test_preview_reports_the_current_nodes_as_the_starting_point():
+    import app as A
+    r = A.app.test_client().post("/api/portal/preview", json={**SPEC, "scenario": "night"})
+    p = r.get_json()["preview"]
+    assert p["nodes_before"] == {"us-east": 1, "eu-west": 1, "ap-southeast": 1} and all(p["nodes_after"][j] >= 1 for j in p["nodes_after"])
 
 
 if __name__ == "__main__":

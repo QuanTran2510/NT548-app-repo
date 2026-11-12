@@ -84,12 +84,11 @@ def create_app():
         try:
             if scenario not in list_scenarios():
                 raise PortalError(f"unknown scenario '{scenario}'; choose one of {list(list_scenarios())}")
-            def run(catalog_dir):
-                return preview_in_repo(spec, scenario, load_catalog(catalog_dir))
             if PORTAL_REPO:
-                out = with_clone(PORTAL_REPO, PORTAL_TOKEN, lambda p: run(p / CATALOG_REL))
+                out = with_clone(PORTAL_REPO, PORTAL_TOKEN,
+                                 lambda p: preview_in_repo(spec, scenario, load_catalog(p / CATALOG_REL), repo_dir=p))
             else:
-                out = run("/nonexistent")                   # no repo configured: built-in services only
+                out = preview_in_repo(spec, scenario, {})   # no repo configured: an empty platform
             return jsonify({"ok": True, "preview": out})
         except PortalError as e:
             return jsonify({"ok": False, "errors": e.messages}), 400

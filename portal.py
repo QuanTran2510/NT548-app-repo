@@ -17,7 +17,8 @@ from pathlib import Path
 from catalog import (CATALOG_REL, app_values_yaml, catalog_json, load_catalog, merged_services, model_spec,
                      normalize, validate)
 from data import SERVICES
-from exporter import ExportError, default_run, propose, read_current
+from data import REGIONS
+from exporter import ExportError, default_run, hourly_cost, propose, read_current_detail
 from model import build_instance, solve
 
 
@@ -66,19 +67,42 @@ def github_open_pr(repo, token, api_base="https://api.github.com"):
     return open_pr
 
 
-def evaluate(spec, scenario, catalog, solver="auto"):
-    """Validate the request and compute the platform plan without and with the new service."""
+def additive_instance(spec, scenario, current):
+    """Model instance for ONE new service on top of what is already deployed.
+
+    Existing pods are frozen: their memory is added to each site's reserved RAM and the current node counts are a
+    floor, so the new service only gets the room that is left (plus extra nodes if it needs them). The other
+    services are neither re-planned nor resized, and no node can be removed by an onboarding request."""
+    detail, nodes = current
+    inst = build_instance(scenario, services={spec["name"]: model_spec(spec)})
+    for j in REGIONS:
+        site = inst["sites"][j]
+        site["reserved_mi"] += sum(n * mem for (svc, st), (n, mem) in detail.items() if st == j)
+        site["min_nodes"] = max(site["min_nodes"], int(nodes.get(j, site["min_nodes"])))
+    return inst, {j: inst["sites"][j]["min_nodes"] for j in REGIONS}
+
+
+def evaluate(spec, scenario, catalog, solver="auto", current=None):
+    """Validate the request and plan the new service.
+
+    current = read_current_detail(repo): additive plan (what the portal uses). Without it the whole platform is
+    re-solved with and without the service (a what-if, used only by tests)."""
     spec = normalize(spec)
     errors = validate(spec, taken_names=set(SERVICES) | set(catalog))
     if errors:
         raise PortalError(errors)
-    before_services = merged_services(catalog)
-    after_services = {**before_services, spec["name"]: model_spec(spec)}
-    before = solve(build_instance(scenario, services=before_services), solver)
-    after = solve(build_instance(scenario, services=after_services), solver)
+    if current is not None:
+        inst, floor = additive_instance(spec, scenario, current)
+        before = {"status": "ok", "nodes": floor, "cost": round(hourly_cost(floor), 4), "placement": {}}
+        after = solve(inst, solver)
+    else:
+        before_services = merged_services(catalog)
+        after_services = {**before_services, spec["name"]: model_spec(spec)}
+        before = solve(build_instance(scenario, services=before_services), solver)
+        after = solve(build_instance(scenario, services=after_services), solver)
     if after["status"] != "ok":
         raise PortalError(f"no placement fits: {after.get('reason', after['status'])}. "
-                          f"Lower the memory, capacity needs or SLO strictness, or ask the platform team to raise the budget.")
+                          f"Lower the memory or capacity needs, loosen the SLO, or ask the platform team to raise the budget.")
     return spec, before, after
 
 
@@ -115,7 +139,7 @@ def onboard(spec, scenario, repo_dir, open_pr, solver="auto", run=default_run, t
     """Create the pull request in a checkout of the config-repo. Returns (branch, url)."""
     repo_dir = Path(repo_dir)
     catalog = load_catalog(repo_dir / CATALOG_REL)
-    spec, before, after = evaluate(spec, scenario, catalog, solver)
+    spec, before, after = evaluate(spec, scenario, catalog, solver, current=read_current_detail(repo_dir))
     name = spec["name"]
 
     def write_extra(repo):
@@ -127,10 +151,11 @@ def onboard(spec, scenario, repo_dir, open_pr, solver="auto", run=default_run, t
     added = sum(after["nodes"].values()) - (sum(before["nodes"].values()) if before["status"] == "ok" else sum(after["nodes"].values()))
     title = f"onboard({name}): {added:+d} node(s), ${after['cost']}/h"
     body = (f"## New service `{name}` (requested through the portal)\n\n{_spec_table(spec)}\n\n"
-            f"The platform was re-optimised for scenario `{scenario}` with this service included.\n\n")
+            f"Sized for scenario `{scenario}`. **Existing services are not changed and no node is removed**: only this\n"
+            f"service's pods are added, plus extra nodes if the remaining room is not enough.\n\n")
     try:
         return propose(after, repo_dir, run=run, open_pr=open_pr, branch_prefix=f"onboard/{name}", title=title,
-                       body_prefix=body, write_extra=write_extra, extra_paths=[CATALOG_REL, f"apps/{name}"])
+                       body_prefix=body, write_extra=write_extra, extra_paths=[CATALOG_REL, f"apps/{name}"], additive=True)
     except subprocess.CalledProcessError as e:
         raise PortalError(_git_failure(e, token))
     except ExportError as e:
@@ -158,8 +183,9 @@ class CatalogCache:
         return merged_services(self.catalog())
 
 
-def preview_in_repo(spec, scenario, catalog, solver="auto"):
-    spec, before, after = evaluate(spec, scenario, catalog, solver)
+def preview_in_repo(spec, scenario, catalog, solver="auto", repo_dir=None):
+    current = read_current_detail(repo_dir) if repo_dir else ({}, {})
+    spec, before, after = evaluate(spec, scenario, catalog, solver, current=current)
     return summarize(spec, before, after)
 
 

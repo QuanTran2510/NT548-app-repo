@@ -8,6 +8,7 @@ Folders without the GENERATED marker (hand-made environments) are never touched.
 """
 import json
 import re
+import secrets
 import subprocess
 import time
 from pathlib import Path
@@ -100,7 +101,26 @@ def read_current(config_repo):
     return pods, nodes
 
 
-def write_envs(result, config_repo, subdir="envs"):
+def read_current_detail(config_repo):
+    """({(service, site): (replicas, memory_mi)}, {site: nodes}) from the generated files of the config-repo."""
+    repo = Path(config_repo)
+    detail = {}
+    envs = repo / "envs"
+    if envs.is_dir():
+        for d in envs.iterdir():
+            f = d / "values.yaml"
+            if f.is_file() and f.read_text().startswith(MARKER):
+                t = f.read_text()
+                svc, site = re.search(r"^service: (\S+)", t, re.M), re.search(r"^site: (\S+)", t, re.M)
+                rep, mem = re.search(r"^replicaCount: (\d+)", t, re.M), re.search(r"memory: (\d+)Mi", t)
+                if svc and site and rep and mem:
+                    detail[(svc.group(1), site.group(1))] = (int(rep.group(1)), int(mem.group(1)))
+    nf = repo / NODES_FILE
+    nodes = json.loads(nf.read_text()).get("node_counts", {}) if nf.is_file() else {}
+    return detail, nodes
+
+
+def write_envs(result, config_repo, subdir="envs", prune=True):
     files = plan_envs(result)
     root = Path(config_repo) / subdir
     root.mkdir(parents=True, exist_ok=True)
@@ -113,7 +133,7 @@ def write_envs(result, config_repo, subdir="envs"):
         f.parent.mkdir(parents=True, exist_ok=True)
         f.write_text(text)
         report["written"].append(name)
-    for d in sorted(p for p in root.iterdir() if p.is_dir() and p.name not in files):
+    for d in sorted(p for p in root.iterdir() if p.is_dir() and p.name not in files and prune):
         f = d / "values.yaml"
         if f.exists() and f.read_text().startswith(MARKER):
             f.unlink()
@@ -133,10 +153,10 @@ def write_nodes(result, config_repo):
     return {"old": old, "new": counts, "changed": old != counts}
 
 
-def write_all(result, config_repo):
-    # validate BOTH parts before touching the disk
-    plan_envs(result), plan_nodes(result)
-    return {"envs": write_envs(result, config_repo), "nodes": write_nodes(result, config_repo)}
+def write_all(result, config_repo, prune=True):
+    """prune=False: only add/update the services in `result`, never delete other generated folders (portal onboarding)."""
+    plan_envs(result), plan_nodes(result)                  # validate BOTH parts before touching the disk
+    return {"envs": write_envs(result, config_repo, prune=prune), "nodes": write_nodes(result, config_repo)}
 
 
 # ----------------------------------------------------------------------------- summary / PR
@@ -145,7 +165,7 @@ def hourly_cost(nodes):
     return sum(SITES[j]["node_price"] * n for j, n in (nodes or {}).items())
 
 
-def summary_markdown(result, before_pods, before_nodes):
+def summary_markdown(result, before_pods, before_nodes, keep_existing=False):
     # No node file yet: the lab always starts with the minimum (one node per site)
     before_nodes = before_nodes or {j: SITES[j]["min_nodes"] for j in REGIONS}
     new_nodes = result["nodes"]
@@ -159,6 +179,8 @@ def summary_markdown(result, before_pods, before_nodes):
         lines.append(f"| {j} | {before_nodes[j]} | {new_nodes[j]} | {m['used_mi']} / {m['capacity_mi']} Mi |")
     lines += ["", "### Pods", "", "| Service | Site | Before | After |", "|---|---|---|---|"]
     after = {(s, j): n for s, p in result["placement"].items() for j, n in p["pods"].items()}
+    if keep_existing:                      # additive plan: services not in the result are left exactly as they are
+        after = {**before_pods, **after}
     for key in sorted(set(before_pods) | set(after)):
         b, a = before_pods.get(key, 0), after.get(key, 0)
         if a != b:
@@ -207,7 +229,7 @@ def gh_cli_open_pr(repo):
 
 
 def propose(result, config_repo, base=None, run=default_run, *, open_pr=None, branch_prefix=None, title=None,
-            body_prefix="", write_extra=None, extra_paths=()):
+            body_prefix="", write_extra=None, extra_paths=(), additive=False):
     """Branch -> write files -> commit -> push -> open a pull request. Returns (branch, pr_url).
 
     open_pr(base, branch, title, body) -> url   (default: `gh pr create`)
@@ -220,10 +242,11 @@ def propose(result, config_repo, base=None, run=default_run, *, open_pr=None, br
     base = base or git("rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
     plan_envs(result), plan_nodes(result)                                  # fail before creating a branch
     before_pods, before_nodes = read_current(config_repo)
-    branch = f"{branch_prefix or 'placement/' + str(result.get('scenario', 'plan'))}-{time.strftime('%Y%m%d-%H%M%S')}"
+    # a short random suffix: two requests in the same second (double click) must not fight over one branch name
+    branch = f"{branch_prefix or 'placement/' + str(result.get('scenario', 'plan'))}-{time.strftime('%Y%m%d-%H%M%S')}-{secrets.token_hex(2)}"
     git("checkout", "-b", branch)
     try:
-        write_all(result, config_repo)
+        write_all(result, config_repo, prune=not additive)
         if write_extra:
             write_extra(Path(config_repo))
         title = title or (f"placement({result.get('scenario')}): nodes {list(result['nodes'].values())}, "
@@ -233,7 +256,7 @@ def propose(result, config_repo, base=None, run=default_run, *, open_pr=None, br
             git("branch", "-D", branch)
             return None, None
         git("push", "-u", "origin", branch)
-        body = body_prefix + summary_markdown(result, before_pods, before_nodes)
+        body = body_prefix + summary_markdown(result, before_pods, before_nodes, keep_existing=additive)
         if open_pr is None:
             url = gh_cli_open_pr(repo)(base, branch, title, body, run=run)
         else:

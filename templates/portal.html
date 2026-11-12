@@ -11,7 +11,7 @@
 </style></head><body>
 <h1>Onboard a service</h1>
 <p class="muted">Describe the service; the optimiser decides where its pods run and whether the platform needs more nodes.
-Submitting opens a pull request{% if repo %} in <b>{{ repo }}</b>{% endif %}; nothing is deployed until a platform engineer merges it.</p>
+<b>Existing services are never changed and no node is removed</b>: only this service's pods are added (and nodes, if the room left is not enough). Submitting opens a pull request{% if repo %} in <b>{{ repo }}</b>{% endif %}; nothing is deployed until a platform engineer merges it.</p>
 {% if not can_submit %}<p class="err"><b>Pull requests are disabled:</b> this pod has no PORTAL_REPO / GITHUB_TOKEN
  (create the <code>portal-github</code> Secret and restart the pod). You can still use Preview.</p>{% endif %}
 <form id="f" onsubmit="return false">
@@ -29,7 +29,7 @@ Submitting opens a pull request{% if repo %} in <b>{{ repo }}</b>{% endif %}; no
  <label>RAM per pod (Mi)<input id="mem_mi" type="number" value="96"></label>
  <label>Requests per active user (/s)<input id="rps_per_active_user" type="number" step="0.01" value="0.1"></label>
  <label>Min replicas<input id="min_replicas" type="number" value="2"></label>
- <label>Plan for scenario<select id="scenario">{% for s in scenarios %}<option>{{ s }}</option>{% endfor %}</select></label>
+ <label>Size the new service for<select id="scenario">{% for s in scenarios %}<option {{ "selected" if s == "normal" else "" }}>{{ s }}</option>{% endfor %}</select></label>
 </fieldset>
 <button id="preview">Preview placement</button>
 <button id="submit" {% if not can_submit %}disabled title="PORTAL_REPO / GITHUB_TOKEN are not configured"{% endif %}>Open pull request</button>

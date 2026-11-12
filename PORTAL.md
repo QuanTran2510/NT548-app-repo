@@ -5,8 +5,10 @@ name, image, port, SLO, capacity per pod, RAM per pod, requests per active user,
 
 1. **Validate**: name is DNS-safe and not a system namespace; image from an allowed registry with a real tag
    (the same rules as the guardrail policies); numbers inside sane ranges.
-2. **Optimise**: the whole platform is solved with and without the new service (`Preview`). If nothing fits the budget
-   or the lab's node limit the request is refused, with the reason.
+2. **Optimise, additively** (`Preview`): the pods that already run are frozen; the new service is placed in the room that
+   is left, and extra nodes are added only if it does not fit. **Existing services are never re-planned and no node is
+   ever removed by an onboarding request.** If nothing fits the budget or the lab's node limit the request is
+   refused, with the reason. (Resizing the whole platform for a scenario is the optimiser's own job, `export_placement.py`.)
 3. **Pull request** in the config-repo: `catalog/services/<name>.json` (model parameters), `apps/<name>/values.yaml`
    (image), re-optimised `envs/` (pods) and `infra/terraform/nodes.auto.tfvars.json` (nodes). The body shows nodes,
    pods and cost before/after.
